@@ -196,6 +196,76 @@ const getCurrentProcessParentsPID = processes => {
 	return pids;
 };
 
+const getChildProcessMap = processes => {
+	const childProcessMap = new Map();
+
+	for (const ps of processes) {
+		const childPids = childProcessMap.get(ps.ppid) ?? [];
+		childPids.push(ps.pid);
+		childProcessMap.set(ps.ppid, childPids);
+	}
+
+	return childProcessMap;
+};
+
+const collectProcessTreePids = (pid, childProcessMap, visited = new Set()) => {
+	if (visited.has(pid)) {
+		return [];
+	}
+
+	visited.add(pid);
+
+	const children = childProcessMap.get(pid) ?? [];
+	const pids = [];
+
+	for (const childPid of children) {
+		pids.push(...collectProcessTreePids(childPid, childProcessMap, visited));
+	}
+
+	pids.push(pid);
+	return pids;
+};
+
+const getProcessNameMatcher = (name, ignoreCase) => {
+	if (ignoreCase) {
+		const normalizedName = name.toLowerCase();
+		return process_ => process_.name.toLowerCase() === normalizedName;
+	}
+
+	return process_ => process_.name === name;
+};
+
+const shouldKillTree = options => options.tree === undefined || options.tree;
+
+const nonWindowsTreeKill = async (input, options) => {
+	if (!shouldKillTree(options) || process.platform === 'win32') {
+		await kill(input, options);
+		return;
+	}
+
+	const processes = await psList();
+	const childProcessMap = getChildProcessMap(processes);
+
+	const rootPids = typeof input === 'number'
+		? [input]
+		: processes
+			.filter(getProcessNameMatcher(input, options.ignoreCase))
+			.map(process_ => process_.pid);
+
+	if (rootPids.length === 0) {
+		await kill(input, options);
+		return;
+	}
+
+	const pids = [...new Set(rootPids.flatMap(pid => collectProcessTreePids(pid, childProcessMap)))];
+
+	await Promise.all(pids.map(async pid => {
+		if (pid !== process.pid) {
+			await kill(pid, options);
+		}
+	}));
+};
+
 const waitForProcessExit = async (parsedInputsMap, timeout, silent) => {
 	const endTime = Date.now() + timeout;
 	let interval = ALIVE_CHECK_MIN_INTERVAL;
@@ -246,7 +316,7 @@ const killWithLimits = async (input, options) => {
 		return;
 	}
 
-	await kill(input, options);
+	await nonWindowsTreeKill(input, options);
 };
 
 export default async function fkill(inputs, options = {}) {

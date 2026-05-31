@@ -18,17 +18,20 @@ async function noopProcessKilled(pid) {
 	assert.strictEqual(await processExists(pid), false);
 }
 
-async function waitForReady(pid) {
-	const readyFile = path.join(os.tmpdir(), `fkill-ready-${pid}`);
+async function waitForFile(filePath) {
 	const timeout = 2000;
 	const start = Date.now();
-	while (!fs.existsSync(readyFile)) {
+	while (!fs.existsSync(filePath)) {
 		if (Date.now() - start > timeout) {
-			throw new Error(`Process ${pid} did not become ready within ${timeout}ms`);
+			throw new Error(`File ${filePath} was not created within ${timeout}ms`);
 		}
 
 		await delay(10); // eslint-disable-line no-await-in-loop
 	}
+}
+
+async function waitForReady(pid) {
+	await waitForFile(path.join(os.tmpdir(), `fkill-ready-${pid}`));
 }
 
 test('pid', async () => {
@@ -282,6 +285,64 @@ test('waitForExit combined with forceAfterTimeout', async () => {
 	await waitForReady(pid);
 	await fkill(pid, {forceAfterTimeout: 200, waitForExit: 1000});
 	assert.strictEqual(await processExists(pid), false);
+});
+
+test('kill process tree for pid', {skip: process.platform === 'win32'}, async () => {
+	const readyFile = path.join(os.tmpdir(), `fkill-tree-${process.pid}`);
+	try {
+		fs.unlinkSync(readyFile);
+	} catch {}
+
+	const child = childProcess.spawn(process.execPath, ['fixture-tree.js', readyFile], {
+		stdio: 'ignore',
+	});
+
+	const {pid} = child;
+
+	await waitForFile(readyFile);
+	const childPid = Number.parseInt(fs.readFileSync(readyFile, 'utf8'), 10);
+
+	assert.strictEqual(await processExists(pid), true);
+	assert.strictEqual(await processExists(childPid), true);
+
+	await fkill(pid, {force: true, waitForExit: 2000});
+
+	assert.strictEqual(await processExists(pid), false);
+	assert.strictEqual(await processExists(childPid), false);
+
+	try {
+		fs.unlinkSync(readyFile);
+	} catch {}
+});
+
+test('tree: false leaves child process running', {skip: process.platform === 'win32'}, async () => {
+	const readyFile = path.join(os.tmpdir(), `fkill-tree-false-${process.pid}`);
+	try {
+		fs.unlinkSync(readyFile);
+	} catch {}
+
+	const child = childProcess.spawn(process.execPath, ['fixture-tree.js', readyFile], {
+		stdio: 'ignore',
+	});
+
+	const {pid} = child;
+
+	await waitForFile(readyFile);
+	const childPid = Number.parseInt(fs.readFileSync(readyFile, 'utf8'), 10);
+
+	assert.strictEqual(await processExists(pid), true);
+	assert.strictEqual(await processExists(childPid), true);
+
+	await fkill(pid, {force: true, tree: false, waitForExit: 2000});
+
+	assert.strictEqual(await processExists(pid), false);
+	assert.strictEqual(await processExists(childPid), true);
+
+	await fkill(childPid, {force: true});
+
+	try {
+		fs.unlinkSync(readyFile);
+	} catch {}
 });
 
 if (process.platform !== 'win32') {
